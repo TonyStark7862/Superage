@@ -1,0 +1,257 @@
+import streamlit as st
+import os
+import inspect
+import re
+from storage.logger_config import logger
+from tools.tool_manager import ToolManager
+from tools.base_tools import Ui_Tool
+
+def tools_page():
+    """
+    Render the tools management page.
+    Allows users to:
+    1. View and select tools
+    2. Filter tools by name or description
+    3. Configure tool settings
+    4. Create new tools
+    """
+    st.markdown("## 🧰 Tools Management")
+    st.markdown("Select tools to enable them for the agent.")
+    
+    # Display tool selection interface
+    tool_selection_section()
+    
+    # Display tool creation interface
+    with st.expander("➕ Create New Tool", expanded=False):
+        create_tool_section()
+
+def tool_selection_section():
+    """Display tool selection interface with filtering and cards."""
+    # Tool filter input
+    tool_search = st.text_input(
+        'Filter tools',
+        placeholder='Enter tool name or description',
+        key='tool_search'
+    )
+    
+    # Filter tools based on search input
+    if tool_search:
+        st.session_state.tool_filtered = [
+            tool for tool in st.session_state.tool_manager.get_tool_names() 
+            if tool_search.lower() in tool.lower() or 
+               tool_search.lower() in st.session_state.tool_manager.tools_description[tool].lower()
+        ]
+    else: 
+        st.session_state.tool_filtered = st.session_state.tool_manager.get_tool_names()
+    
+    # Display tool cards in a grid
+    display_tool_cards()
+    
+    # Update selected tools in session state
+    st.session_state.tools = st.session_state.tool_manager.get_selected_tools(st.session_state.selected_tools)
+    logger.debug(f'Tools selected: {st.session_state.selected_tools}')
+
+def display_tool_cards():
+    """Display tool cards in a responsive grid layout."""
+    # Reset selected tools
+    st.session_state.selected_tools = []
+    
+    # Create columns for responsive grid layout
+    num_tools = len(st.session_state.tool_filtered)
+    cols_per_row = 3
+    
+    # Check if we have any tools to display
+    if num_tools == 0:
+        st.info("No tools match your filter criteria.")
+        return
+    
+    # Display tools in grid layout
+    for i in range(0, num_tools, cols_per_row):
+        cols = st.columns(cols_per_row)
+        
+        for j in range(cols_per_row):
+            if i + j < num_tools:
+                tool_name = st.session_state.tool_filtered[i + j]
+                with cols[j]:
+                    display_tool_card(tool_name)
+
+def display_tool_card(tool_name):
+    """
+    Display a single tool card with toggle and description.
+    
+    Args:
+        tool_name: Name of the tool to display
+    """
+    # Get the tool instance
+    tool = st.session_state.tool_manager.get_selected_tools([tool_name])[0]
+    
+    # Extract tool properties
+    title = getattr(tool, 'title', tool.name)
+    description = getattr(tool, 'description', 'No description available')
+    icon = getattr(tool, 'icon', '🔧')
+    category = getattr(tool, 'category', 'General')
+    version = getattr(tool, 'version', '1.0')
+    
+    # Create card with styling
+    with st.container():
+        # Style the container as a card
+        st.markdown(f"""
+        <div class="stCard">
+            <div style="display: flex; align-items: center; margin-bottom: 0.5rem;">
+                <span style="font-size: 1.5rem; margin-right: 0.5rem;">{icon}</span>
+                <h3 style="margin: 0; flex-grow: 1;">{title}</h3>
+            </div>
+            <p style="color: var(--text-secondary); margin-bottom: 0.5rem;">{description}</p>
+            <div style="display: flex; justify-content: space-between; margin-top: 0.5rem;">
+                <span style="color: var(--primary-color); font-size: 0.8rem;">{category}</span>
+                <span style="color: var(--text-secondary); font-size: 0.8rem;">v{version}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Create toggle switch for enabling/disabling tool
+        is_enabled = st.checkbox(
+            "Enable",
+            value=tool_name in st.session_state.clicked_cards and st.session_state.clicked_cards[tool_name],
+            key=f"tool_toggle_{tool_name}"
+        )
+        
+        # Update clicked cards and selected tools
+        st.session_state.clicked_cards[tool_name] = is_enabled
+        if is_enabled:
+            st.session_state.selected_tools.append(tool_name)
+        
+        # Display tool configuration UI if enabled
+        if is_enabled and hasattr(tool, '_ui'):
+            st.divider()
+            st.caption("Tool Settings")
+            tool._ui()
+
+def create_tool_section():
+    """Display interface for creating new tools."""
+    st.markdown("### Create a New Tool")
+    st.info("Create a new tool by defining a function with a docstring description.")
+    
+    # Tool name input
+    new_tool_name = st.text_input(
+        "Tool Name",
+        placeholder="calculator_advanced",
+        help="Name for your tool file (lowercase, no spaces)"
+    )
+    
+    # Tool code editor
+    st.markdown("#### Tool Code")
+    st.caption("Define a function with a descriptive docstring.")
+    
+    code_template = """def my_tool_function(input_str):
+    \"\"\"
+    Description of what your tool does.
+    This description will be used by the agent to understand when to use this tool.
+    \"\"\"
+    # Your code here
+    result = f"Processed: {input_str}"
+    return result
+"""
+    
+    tool_code = st.text_area(
+        "Tool Code",
+        value=code_template,
+        height=300,
+        help="Define a function with a descriptive docstring"
+    )
+    
+    # Tool creation button
+    if st.button("Create Tool", type="primary"):
+        if not new_tool_name:
+            st.error("Please provide a tool name.")
+            return
+            
+        # Validate tool name
+        if not re.match(r'^[a-z][a-z0-9_]*$', new_tool_name):
+            st.error("Tool name should start with a letter and contain only lowercase letters, numbers, and underscores.")
+            return
+            
+        # Validate code and extract function name
+        function_name = validate_tool_code(tool_code)
+        if not function_name:
+            return
+            
+        # Save the tool file
+        create_tool_file(new_tool_name, tool_code, function_name)
+
+def validate_tool_code(code):
+    """
+    Validate the provided tool code.
+    
+    Args:
+        code: Python code string to validate
+        
+    Returns:
+        Function name if valid, None otherwise
+    """
+    try:
+        # Try compiling to check for syntax errors
+        compile(code, '<string>', 'exec')
+        
+        # Extract function name
+        function_match = re.search(r'def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', code)
+        if not function_match:
+            st.error("Could not find a function definition in the code.")
+            return None
+            
+        function_name = function_match.group(1)
+        
+        # Check for docstring
+        docstring_match = re.search(r'def\s+[^:]+:\s*\n\s*"""(.+?)"""', code, re.DOTALL)
+        if not docstring_match:
+            st.error("Function must have a docstring description.")
+            return None
+            
+        return function_name
+        
+    except Exception as e:
+        st.error(f"Code has syntax errors: {str(e)}")
+        return None
+
+def create_tool_file(file_name, code, function_name):
+    """
+    Create a new tool file in the tools_list directory.
+    
+    Args:
+        file_name: Name for the file (without extension)
+        code: Python code for the tool
+        function_name: Name of the function defined in the code
+    """
+    try:
+        # Path to tools_list directory
+        tools_list_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '..',
+            'tools',
+            'tools_list'
+        )
+        
+        # Ensure the directory exists
+        os.makedirs(tools_list_dir, exist_ok=True)
+        
+        # Create the file path
+        file_path = os.path.join(tools_list_dir, f"{file_name}.py")
+        
+        # Check if file already exists
+        if os.path.exists(file_path):
+            st.error(f"A tool with name '{file_name}' already exists.")
+            return
+            
+        # Write code to file
+        with open(file_path, "w") as f:
+            f.write(code)
+            
+        # Reload tool manager to include the new tool
+        st.session_state.tool_manager = ToolManager()
+        st.session_state.tool_list = st.session_state.tool_manager.structured_tools
+        
+        # Success message
+        st.success(f"Tool '{function_name}' created successfully! You can now enable it in the tools list.")
+        
+    except Exception as e:
+        st.error(f"Error creating tool: {str(e)}")
