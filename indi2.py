@@ -608,10 +608,9 @@ Chat History:
         return prompt
     
     def _call_abc_model(self, prompt):
-        """Call our custom model - implementation would be provided separately"""
+        """Call our custom model"""
         # This is where you'd call your abc_response function
-        # For now, we'll return a placeholder
-        return "This would be a response from the abc_response(prompt) function. In a real implementation, you would call your model here."
+        return abc_response(prompt)
 
 
 # =============================================
