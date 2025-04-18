@@ -1211,27 +1211,27 @@ def menusetup():
     col1, col2, col3 = st.columns(3)
     
     btn_style = """
-    <style>
-    div.stButton > button {
-        background-color: transparent;
-        color: #4F8BF9;
-        border: none;
-        border-radius: 0;
-        font-weight: normal;
-        width: 100%;
-        height: 50px;
-    }
-    div.stButton > button:hover {
-        background-color: rgba(79, 139, 249, 0.1);
-        color: #4F8BF9;
-    }
-    div.stButton > button:focus {
-        background-color: rgba(79, 139, 249, 0.2);
-        color: #4F8BF9;
-        box-shadow: none;
-    }
-    </style>
-    """
+<style>
+div.stButton > button {
+    background-color: transparent;
+    color: #4F8BF9;
+    border: none;
+    border-radius: 0;
+    font-weight: normal;
+    width: 100%;
+    height: 50px;
+}
+div.stButton > button:hover {
+    background-color: rgba(79, 139, 249, 0.1);
+    color: #4F8BF9;
+}
+div.stButton > button:focus {
+    background-color: rgba(79, 139, 249, 0.2);
+    color: #4F8BF9;
+    box-shadow: none;
+}
+</style>
+"""
     st.markdown(btn_style, unsafe_allow_html=True)
     
     # Highlight active tab
