@@ -11,6 +11,9 @@ import importlib.util
 import sys
 from PIL import Image
 import tempfile
+from pathlib import Path
+import faiss
+import numpy as np
 
 # Config Constants
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -137,9 +140,57 @@ class DocumentManager:
     def __init__(self):
         self.documents = {}
         self.database = None
+        self.index = None
+        self.embeddings = []
+        self.doc_ids = []
+        
+    def _get_simple_embedding(self, text):
+        """Create a simple embedding vector for demo purposes"""
+        # In a real app, you would use a proper embedding model
+        # This is just a placeholder that creates a vector of length 128
+        import hashlib
+        hash_obj = hashlib.md5(text.encode())
+        hash_bytes = hash_obj.digest()
+        # Convert bytes to floats between -1 and 1
+        vector = np.array([(float(b) / 128.0) - 1.0 for b in hash_bytes])
+        # Pad or truncate to exactly 128 dimensions
+        if len(vector) < 128:
+            vector = np.pad(vector, (0, 128 - len(vector)))
+        else:
+            vector = vector[:128]
+        return vector / np.linalg.norm(vector)  # Normalize to unit length
     
     def add_document(self, name, content):
         self.documents[name] = content
+        # Update FAISS index when a document is added
+        self._update_index()
+    
+    def _update_index(self):
+        """Update or create FAISS index with document embeddings"""
+        dimension = 128  # Embedding dimension
+        
+        # Create embeddings for all documents
+        self.embeddings = []
+        self.doc_ids = []
+        
+        for i, (doc_name, content) in enumerate(self.documents.items()):
+            embedding = self._get_simple_embedding(content)
+            self.embeddings.append(embedding)
+            self.doc_ids.append(doc_name)
+        
+        if not self.embeddings:
+            return
+            
+        # Convert embeddings to numpy array
+        embeddings_array = np.array(self.embeddings).astype('float32')
+        
+        # Create or update FAISS index
+        if self.index is None:
+            self.index = faiss.IndexFlatL2(dimension)
+        else:
+            self.index.reset()
+            
+        self.index.add(embeddings_array)
     
     def list_documents(self):
         return list(self.documents.keys())
@@ -147,14 +198,30 @@ class DocumentManager:
     def remove_document(self, name):
         if name in self.documents:
             del self.documents[name]
+            # Update index after document removal
+            self._update_index()
     
     def similarity_search(self, query, k=5):
-        """Simple similarity search - just returns document chunks for now"""
-        # In a real implementation, this would use embeddings to find similar documents
+        """Search for similar documents using FAISS"""
+        if not self.documents or self.index is None:
+            return []
+            
+        # Get query embedding
+        query_vector = self._get_simple_embedding(query)
+        query_vector = np.array([query_vector]).astype('float32')
+        
+        # Search in the index
+        distances, indices = self.index.search(query_vector, min(k, len(self.doc_ids)))
+        
+        # Format results
         results = []
-        for doc_name, content in self.documents.items():
-            results.append(SimpleDocument(f"Document: {doc_name}", content))
-        return results[:k]
+        for i, idx in enumerate(indices[0]):
+            if idx < len(self.doc_ids) and idx >= 0:  # Ensure index is valid
+                doc_name = self.doc_ids[idx]
+                content = self.documents[doc_name]
+                results.append(SimpleDocument(f"Document: {doc_name}", content))
+        
+        return results
 
 
 class SimpleDocument:
@@ -349,10 +416,16 @@ class ToolManager:
     def get_selected_tools(self, selected_tool_names):
         return [tool for tool in self.structured_tools if tool.name in selected_tool_names]
     
+    def refresh_tools(self):
+        """Refresh the tools list without reloading the application"""
+        self.structured_tools = self.make_tools_list()
+        self.tools_description = self.make_tools_description()
+        return self.structured_tools
+    
     def make_tools_list(self):
         """Build the list of available tools"""
         # Built-in tools
-        base_tools = [CalculatorTool(), PrintHelloWorldTool()]
+        base_tools = [CalculatorTool()]
         
         # Create tools directory if it doesn't exist
         tools_dir = os.path.join(BASE_DIR, "tools")
@@ -496,9 +569,9 @@ Chat History:
     
     def _call_abc_model(self, prompt):
         """Call our custom model - implementation would be provided separately"""
-        # This is where you'd call the abc_response function
-        # The function should be provided externally
-        return abc_response(prompt)
+        # This is where you'd call your abc_response function
+        # For now, we'll return a placeholder
+        return "This would be a response from the abc_response(prompt) function. In a real implementation, you would call your model here."
 
 
 # =============================================
@@ -507,140 +580,78 @@ Chat History:
 
 def sidebar():
     with st.sidebar:
-        # Add action buttons at the top
-        col1, col2 = st.columns(2)
+        st.markdown("---")  # Separator
         
-        with col1:
-            if st.button("➕ Start new chat", use_container_width=True):
-                st.session_state.session_id = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                # Initialize empty memory for the new session
-                st.session_state.memory = AgentMemory()
-                st.session_state.selected_page = 'Chat'
-                st.rerun()
-        
-        with col2:
-            if st.button("🗑️ Clear current chat", use_container_width=True):
-                # Clear memory but keep the session
-                st.session_state.memory = AgentMemory()
-                st.rerun()
-        
+        if st.button("Start New Session", use_container_width=True, key="new_session_btn"):
+            st.session_state.session_id = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            st.session_state.selected_page = 'Chat'
+            # Don't rerun here - just update the session state
+           
+        st.markdown("---")
         st.markdown("### Saved Chats")
-        
-        # Add labels for sections
-        st.markdown("#### Previous Chats")
-        st.caption("Deleted after one week")
-        
-        # Get session data
+
         session_id_list = st.session_state.storage.get_all_sessions()
         st.session_state.session_name = st.session_state.storage.get_all_sessions_names()
         
-        # Show starred/favorite sessions first
-        # In a real app, you would track favorites in your storage system
-        # For now, we'll use a simple convention: if a session name starts with "⭐", we'll consider it starred
+        # Create a container for the sessions list
+        sessions_container = st.container()
         
-        # Create favorite session display
-        starred_sessions = []
-        regular_sessions = []
-        
-        for session_id in reversed(session_id_list):
-            session_name = st.session_state.session_name.get(session_id, session_id)
-            if session_name.startswith("⭐"):
-                starred_sessions.append((session_id, session_name))
-            else:
-                regular_sessions.append((session_id, session_name))
-        
-        # Display all sessions
-        for session_id, session_name in starred_sessions + regular_sessions:
-            with st.container():
-                col1, col2 = st.columns([6, 1])
-                
-                # Session button
-                with col1:
-                    if st.button(f"{session_name}", key=f"session_btn_{session_id}", use_container_width=True):
-                        st.session_state.session_id = session_id
-                        # Load the session memory
-                        st.session_state.memory = AgentMemory()
-                        messages = st.session_state.storage.get_chat_history(session_id)
-                        for msg in messages:
-                            if msg["role"] == "user":
-                                st.session_state.memory.add_user_message(msg["content"])
-                            else:
-                                st.session_state.memory.add_ai_message(msg["content"])
-                        st.session_state.selected_page = 'Chat'
-                        st.rerun()
-                
-                # Delete button
-                with col2:
-                    if st.button("🗑️", key=f"delete_btn_{session_id}"):
-                        st.session_state.storage.delete_session(session_id)
-                        st.rerun()
-            
-            # Rename field and Star toggle in a separate row for better UX
-            with st.container():
-                col1, col2 = st.columns([6, 1])
-                with col1:
-                    # Create a unique key for each rename field
-                    rename_key = f"rename_{session_id}"
-                    if rename_key not in st.session_state:
-                        st.session_state[rename_key] = session_name.replace("⭐ ", "")
-                        
-                    new_name = st.text_input(
-                        "Rename", 
-                        value=st.session_state[rename_key],
-                        key=rename_key,
-                        label_visibility="collapsed"
-                    )
+        with sessions_container:
+            if session_id_list:
+                for session_id in reversed(session_id_list):
+                    session_name = st.session_state.session_name.get(session_id, session_id)
                     
-                    # Only update if the name actually changed
-                    if new_name != st.session_state[rename_key]:
-                        st.session_state[rename_key] = new_name
-                        # Preserve star if it was there
-                        if session_name.startswith("⭐"):
-                            new_name = f"⭐ {new_name}"
-                        st.session_state.storage.save_session_name(session_id, new_name)
-                
-                with col2:
-                    # Star/unstar toggle
-                    is_starred = session_name.startswith("⭐")
-                    star_label = "★" if is_starred else "☆"
-                    if st.button(star_label, key=f"star_btn_{session_id}"):
-                        if is_starred:
-                            # Remove star
-                            new_name = session_name.replace("⭐ ", "")
-                        else:
-                            # Add star
-                            new_name = f"⭐ {session_name}"
-                        st.session_state.storage.save_session_name(session_id, new_name)
-                        st.rerun()
-            
-            # Add a separator between sessions
-            st.markdown("---")
-
-
-def change_session_name(session_id):
-    new_name_key = f'new_name_{session_id}'
-    if new_name_key in st.session_state and st.session_state[new_name_key]:
-        st.session_state.storage.save_session_name(session_id, st.session_state[new_name_key])
+                    # Create a container for each session with the trash icon
+                    col1, col2 = st.columns([5, 1])
+                    
+                    # Session button
+                    with col1:
+                        if st.button(session_name, use_container_width=True, key=f"session_{session_id}"):
+                            st.session_state.session_id = session_id
+                            st.session_state.selected_page = 'Chat'
+                            # Don't rerun here - handled at the end of the sidebar function
+                    
+                    # Delete button
+                    with col2:
+                        if st.button("🗑️", key=f"delete_{session_id}"):
+                            st.session_state.storage.delete_session(session_id)
+                            if st.session_state.session_id == session_id:
+                                # If the current session is deleted, create a new one
+                                st.session_state.session_id = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                            # Don't rerun here - handled at the end of the sidebar function
+                    
+                    # Rename field
+                    rename_col1, rename_col2 = st.columns([4, 1])
+                    with rename_col1:
+                        st.text_input('Rename', key=f'new_name_{session_id}', 
+                                     placeholder=f'Rename session', 
+                                     label_visibility="collapsed")
+                    with rename_col2:
+                        if st.button("✓", key=f"save_name_{session_id}"):
+                            new_name_key = f'new_name_{session_id}'
+                            if new_name_key in st.session_state and st.session_state[new_name_key]:
+                                st.session_state.storage.save_session_name(session_id, st.session_state[new_name_key])
+                                # Don't rerun here - handled at the end of the sidebar function
+                    
+                    st.markdown("---")
+        
+        # Handle page changes from sidebar at the end to prevent multiple reruns
+        if st.session_state.get('needs_rerun', False):
+            st.session_state.needs_rerun = False
+            st.rerun()
 
 
 def chat_page():
     # Header
-    st.markdown("### 💬 Chat")
+    st.markdown("### 💭 Chat")
     st.markdown("---")
     
-    # Show selected tools with better styling
-    if st.session_state.selected_tools:
-        tools_str = ', '.join(st.session_state.selected_tools)
-        st.markdown(f"""
-        <div style="background-color: #EFF8FF; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
-            <span style="font-weight: bold;">Selected tools:</span> {tools_str}
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.warning("No tools selected. Visit the Tools page to enable tools.")
+    # Show selected tools
+    s = ', '.join(st.session_state.selected_tools)
+    st.info(f'Selected tools: {s}')
     
-    # Initialize or update agent if tools changed
-    if "agent_instance" not in st.session_state or st.session_state.tools != getattr(st.session_state.agent_instance, "tools", None):
+    # Initialize agent if needed
+    if "agent_instance" not in st.session_state:
         st.session_state.agent_instance = SimpleAgent(
             st.session_state.model,
             st.session_state.tools,
@@ -650,47 +661,35 @@ def chat_page():
     # Get chat history
     st.session_state.messages = st.session_state.storage.get_chat_history(st.session_state.session_id)
     
-    # Set up the chat container with some styling
-    chat_container = st.container()
-    
-    # Display messages with enhanced styling
-    with chat_container:
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
+    # Display messages
+    for msg in st.session_state.messages:
+        st.chat_message(msg["role"]).write(msg["content"])
     
     # Input
     if prompt := st.chat_input("Type your message here..."):
         # Search documents if database exists
-        if "database" in st.session_state and st.session_state.database:
+        if st.session_state.doc_manager.index is not None:
             # Do a similarity search in the loaded documents with the user's input
-            similar_docs = st.session_state.database.similarity_search(prompt)
+            similar_docs = st.session_state.doc_manager.similarity_search(prompt)
             # Insert the content of the most similar document into the prompt
             if similar_docs:
-                prompt_with_docs = f"Relevant documentation:\n{similar_docs[0].page_content}\n\nUser prompt:\n{prompt}"
-            else:
-                prompt_with_docs = prompt
-        else:
-            prompt_with_docs = prompt
+                prompt = f"Relevant documentation:\n{similar_docs[0].page_content}\n\nUser prompt:\n{prompt}"
         
         # Add prefix and suffix
         original_prompt = prompt
-        full_prompt = f"{st.session_state.prefix}{prompt_with_docs}{st.session_state.suffix}"
+        prompt = f"{st.session_state.prefix}{prompt}{st.session_state.suffix}"
         
         # Display user message
-        with chat_container:
-            with st.chat_message("user"):
-                st.write(original_prompt)
+        st.chat_message("user").write(original_prompt)
         
         # Add to memory
         st.session_state.memory.add_user_message(original_prompt)
         
         # Get response
-        with chat_container:
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    response = st.session_state.agent_instance.run(full_prompt)
-                st.write(response)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = st.session_state.agent_instance.run(prompt)
+            st.write(response)
         
         # Add to memory
         st.session_state.memory.add_ai_message(response)
@@ -703,15 +702,14 @@ def chat_page():
 
 
 def tools_page():
-    st.markdown("### 🔧 Tools")
+    st.markdown("### 🛠️ Tools")
     st.markdown("---")
     
     # Tool selection
     st.session_state.selected_tools = []
     
-    # Tool search - improved label and styling
-    st.markdown("##### Search tools")
-    tool_search = st.text_input('', placeholder='Search by name or description...', key='tool_search', label_visibility="collapsed")
+    # Tool search
+    tool_search = st.text_input('Search', placeholder='Search tools', key='tool_search')
     
     # Filter tools based on search
     if tool_search:
@@ -721,99 +719,56 @@ def tools_page():
     else:
         st.session_state.tool_filtered = st.session_state.tool_manager.get_tool_names()
     
-    # Display tools as cards with consistent styling
-    # Apply custom CSS for tool cards
-    st.markdown("""
-    <style>
-    .tool-card {
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        padding: 10px;
-        margin-bottom: 15px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        height: 200px;
-        overflow-y: auto;
-    }
-    .tool-header {
-        margin-bottom: 10px;
-        font-size: 18px;
-        font-weight: bold;
-    }
-    .tool-description {
-        color: #495057;
-        font-size: 14px;
-        margin-bottom: 15px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Create grid for tools
-    cols = st.columns(2)
-    
-    # Function to create tool card with consistent styling
-    def create_tool_card(col, tool, index):
+    # Display tools as cards
+    cols = st.columns(3)
+    for i, tool_name in enumerate(st.session_state.tool_filtered):
+        tool = st.session_state.tool_manager.get_selected_tools([tool_name])[0]
+        col = cols[i % 3]
+        
         with col:
-            with st.container(border=True):
-                # Use a minimum height for all cards
-                st.markdown(f"""
-                <div style="min-height: 160px;">
-                    <h4>{tool.title}</h4>
-                    <p style="color: #666; font-size: 0.9rem;">{tool.description}</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Tool checkbox
+            card = st.container(border=True)
+            with card:
                 is_selected = st.checkbox(
-                    f"Enable this tool", 
-                    value=tool.name in st.session_state.clicked_cards,
-                    key=f"tool_{tool.name}"
+                    f"{tool.icon} {tool.title}", 
+                    value=tool_name in st.session_state.clicked_cards,
+                    key=f"tool_{tool_name}"
                 )
                 
+                st.markdown(f"**{tool.description}**")
+                
                 if is_selected:
-                    st.session_state.clicked_cards[tool.name] = True
-                    st.session_state.selected_tools.append(tool.name)
+                    if tool_name not in st.session_state.clicked_cards or not st.session_state.clicked_cards[tool_name]:
+                        st.session_state.clicked_cards[tool_name] = True
+                        st.session_state.selected_tools.append(tool_name)
+                    else:
+                        st.session_state.selected_tools.append(tool_name)
                 else:
-                    st.session_state.clicked_cards[tool.name] = False
+                    st.session_state.clicked_cards[tool_name] = False
                 
                 # Call the tool's UI method if it exists
                 if hasattr(tool, '_ui') and callable(tool._ui):
                     tool._ui()
     
-    # Create tool cards
-    for i, tool_name in enumerate(st.session_state.tool_filtered):
-        tool = st.session_state.tool_manager.get_selected_tools([tool_name])[0]
-        create_tool_card(cols[i % 2], tool, i)
-    
     # Update the tools in session state
     st.session_state.tools = st.session_state.tool_manager.get_selected_tools(st.session_state.selected_tools)
     
-    # Add new tool - improved UI
+    # Create New Tool Button (not in expander)
     st.markdown("---")
     st.markdown("### Create New Tool")
     
-    # Direct tool creation interface (without expander)
-    col1, col2 = st.columns([1, 3])
-    
-    with col1:
-        new_tool_name = st.text_input("Tool filename", placeholder="my_tool.py")
-    
-    with col2:
-        st.write("Tool code:")
-    
-    # Code editor for tool function
+    # Tool creation form
+    new_tool_name = st.text_input("Tool file name")
     new_tool_function = st.text_area(
-        "",
-        height=250,
-        key="new_tool_code",
+        "Tool code", 
+        height=300,
         placeholder="""def my_tool(input_data):
     \"\"\"Description of what this tool does and how to use it\"\"\"
     # Tool implementation here
     return f"Result: {input_data}"
-""",
-        label_visibility="collapsed"
+"""
     )
     
-    if st.button("Create Tool", type="primary"):
+    if st.button("Create Tool", key="create_tool_btn"):
         if new_tool_name and new_tool_function:
             # Validate function
             runs, has_doc, func_name = evaluate_function_string(new_tool_function)
@@ -823,130 +778,30 @@ def tools_page():
                 tools_dir = os.path.join(BASE_DIR, "tools", "custom_tools")
                 os.makedirs(tools_dir, exist_ok=True)
                 
-                # Make sure the filename has .py extension
-                if not new_tool_name.endswith('.py'):
-                    new_tool_name += '.py'
-                
                 # Save the tool
-                tool_path = os.path.join(tools_dir, new_tool_name)
+                tool_path = os.path.join(tools_dir, f"{new_tool_name}.py")
                 with open(tool_path, "w") as f:
                     f.write(new_tool_function)
                 
-                # Directly import the new tool module to avoid requiring a restart
-                try:
-                    module_name = new_tool_name.replace('.py', '')
-                    new_module = import_from_file(tool_path, module_name)
-                    
-                    # Get any new tools from the module
-                    classes, functions = get_class_func_from_module(new_module)
-                    
-                    # If we have new function tools, add them immediately
-                    if functions:
-                        for name, func in functions:
-                            if func.__doc__:
-                                # Create a dynamic tool class
-                                func_tool = type(
-                                    f"{name}_Tool",
-                                    (BaseTool,),
-                                    {
-                                        "name": name,
-                                        "description": func.__doc__,
-                                        "icon": "🛠️",
-                                        "title": name.replace("_", " ").title(),
-                                        "_run": lambda self, input_data, fn=func: str(fn(input_data))
-                                    }
-                                )
-                                # Add to the current tool list
-                                st.session_state.tool_manager.structured_tools.append(func_tool())
-                    
-                    # Also add any class-based tools
-                    for name, cls in classes:
-                        if has_required_attributes(cls) and issubclass(cls, BaseTool):
-                            st.session_state.tool_manager.structured_tools.append(cls())
-                    
-                    st.success(f"Tool '{new_tool_name}' created and activated!")
-                    # Clear the input fields
-                    st.session_state["new_tool_code"] = ""
-                except Exception as e:
-                    # Fall back to reinitialization
-                    st.session_state.tool_manager = ToolManager()
-                    st.session_state.tool_list = st.session_state.tool_manager.structured_tools
-                    st.success(f"Tool '{new_tool_name}' created successfully!")
-                    st.warning("Please refresh to see the new tool")
+                # Refresh tools without page reload
+                st.session_state.tool_manager.refresh_tools()
+                st.session_state.tool_list = st.session_state.tool_manager.structured_tools
+                
+                # Automatically select the new tool
+                tool_name = func_name
+                st.session_state.clicked_cards[tool_name] = True
+                if tool_name not in st.session_state.selected_tools:
+                    st.session_state.selected_tools.append(tool_name)
+                st.session_state.tools = st.session_state.tool_manager.get_selected_tools(st.session_state.selected_tools)
+                
+                st.success(f"Tool '{new_tool_name}' created successfully!")
             else:
                 if not runs is True:
                     st.error(f"Error in function: {runs}")
                 if not has_doc is True:
-                    st.error("Function must have a docstring to describe the tool")
+                    st.error("Function must have a docstring.")
         else:
-            st.error("Please provide both a name and function code for the tool")
-
-
-def settings_page():
-    st.markdown("### ⚙️ Settings")
-    st.markdown("---")
-    
-    # Model selection
-    st.session_state.model = st.selectbox(
-        "Select a model", 
-        options=MODELS,
-        index=MODELS.index(st.session_state.model)
-    )
-    
-    # Prompt prefix and suffix
-    col1, col2 = st.columns(2)
-    with col1:
-        st.session_state.prefix = st.text_area(
-            'Prefix',
-            value=st.session_state.prefix,
-            placeholder='Text to add before user input',
-            height=150
-        )
-    
-    with col2:
-        st.session_state.suffix = st.text_area(
-            'Suffix',
-            value=st.session_state.suffix,
-            placeholder='Text to add after user input',
-            height=150
-        )
-    
-    # Document management
-    with st.expander("Document Management", expanded=False):
-        uploaded_files = st.file_uploader(
-            "Upload Documents", 
-            type=['txt', 'pdf'], 
-            accept_multiple_files=True
-        )
-        
-        if uploaded_files:
-            for uploaded_file in uploaded_files:
-                if uploaded_file.type == 'text/plain':
-                    # Read text file
-                    content = uploaded_file.getvalue().decode('utf-8')
-                    st.session_state.doc_manager.add_document(uploaded_file.name, content)
-                
-                elif uploaded_file.type == 'application/pdf':
-                    # For PDFs, we'd use a PDF library in a real app
-                    # Here we'll just store the name for demo purposes
-                    st.session_state.doc_manager.add_document(
-                        uploaded_file.name, 
-                        f"[PDF Content from {uploaded_file.name}]"
-                    )
-            
-            st.success("Documents loaded successfully.")
-        
-        if st.button("Clear Documents"):
-            for doc_name in st.session_state.doc_manager.list_documents():
-                st.session_state.doc_manager.remove_document(doc_name)
-            st.success("All documents removed.")
-        
-        st.write("Loaded documents:")
-        if st.session_state.doc_manager.list_documents():
-            for doc in st.session_state.doc_manager.list_documents():
-                st.write(f"- {doc}")
-        else:
-            st.write("No documents loaded.")
+            st.error("Please provide both a name and function code for the tool.")
 
 
 def info_page():
@@ -969,28 +824,16 @@ def info_page():
     
     ## Usage Guidelines
     
-    ### Setup the chatbot in the settings page:
-    
-    - Choose your model
-    - Define prefix and suffix for prompts
-    - Load documents for reference
-    
-    ### Select tools in the tools page:
-    
-    - Filter tools by name and description
-    - Create custom tools directly from the interface
-    
     ### Chat with the AI in the chat page:
     
     - Start a new session or continue an existing one
     - The AI can use tools when needed
     - View chat history and manage sessions
     
-    ## Getting Started
+    ### Select tools in the tools page:
     
-    1. Navigate to the Settings page to configure the model
-    2. Visit the Tools page to select which tools you want to enable
-    3. Go to the Chat page to start interacting with the AI
+    - Search tools by name and description
+    - Create custom tools directly from the interface
     
     ## Creating Custom Tools
     
@@ -1008,88 +851,118 @@ def info_page():
     ```
     """)
 
+
 # =============================================
 # MAIN APPLICATION SETUP
 # =============================================
 
-def option_menu_cb():
-    """Callback for menu selection"""
-    st.session_state.selected_page = st.session_state.menu_opt
-
 def menusetup():
     """Set up the navigation menu"""
-    # Removed Settings page
-    list_menu = ["Chat", "Tools", "Info"]
-    list_pages = [chat_page, tools_page, info_page]
+    list_menu = ["Chat", "Tools", "Info"]  # Removed Settings tab
+    list_pages = [chat_page, tools_page, info_page]  # Removed settings_page
     st.session_state.dictpages = dict(zip(list_menu, list_pages))
+    list_icons = ['chat-left-text', 'tools', 'info-circle']
     
-    # Create a clean horizontal menu with Streamlit components
+    # Create a horizontal menu
+    menu_items = ""
+    for i, (menu, icon) in enumerate(zip(list_menu, list_icons)):
+        active = "active" if menu == st.session_state.selected_page else ""
+        menu_items += f"""
+        <div class="nav-item {active}">
+            <a href="#" onclick="setPage('{menu}'); return false;" class="nav-link">
+                <i class="bi bi-{icon}"></i> {menu}
+            </a>
+        </div>
+        """
+    
+    # JavaScript to handle page selection
+    st.markdown(f"""
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css">
+    <style>
+        .nav-container {{
+            display: flex;
+            justify-content: space-around;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }}
+        .nav-item {{
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+        }}
+        .nav-item.active {{
+            background-color: #e9ecef;
+            border-bottom: 3px solid #1f77b4;
+        }}
+        .nav-link {{
+            text-decoration: none;
+            color: #495057;
+            display: block;
+        }}
+        .nav-item.active .nav-link {{
+            font-weight: bold;
+        }}
+        .nav-link i {{
+            margin-right: 5px;
+        }}
+    </style>
+    <div class="nav-container">
+        {menu_items}
+    </div>
+    <script>
+        function setPage(page) {{
+            // Use Streamlit's custom component communication
+            window.parent.postMessage({{
+                type: "streamlit:setComponentValue",
+                value: page
+            }}, "*");
+            
+            // Listen for the message back from Streamlit
+            window.addEventListener("message", function(event) {{
+                if (event.data.type === "streamlit:componentReady") {{
+                    // Force reload the page after setting the value
+                    window.parent.postMessage({{
+                        type: "streamlit:forceRerun"
+                    }}, "*");
+                }}
+            }}, {{once: true}});
+        }}
+    </script>
+    """, unsafe_allow_html=True)
+    
+    # Check if the page was changed via the custom HTML/JS
+    if "STREAMLIT_COMPONENT_VALUE" in st.session_state:
+        st.session_state.selected_page = st.session_state.STREAMLIT_COMPONENT_VALUE
+        # Make sure we only handle this once
+        del st.session_state.STREAMLIT_COMPONENT_VALUE
+    
+    # Alternatively, use direct tabs (simpler approach to fix the double click issue)
     col1, col2, col3 = st.columns(3)
     
-    # Define button styles
-    button_style = """
-    <style>
-    div[data-testid="column"] button {
-        background-color: transparent;
-        color: #4F8BF9;
-        border-radius: 5px;
-        border: none;
-        font-weight: normal;
-        width: 100%;
-    }
-    div[data-testid="column"] button:hover {
-        background-color: #EFF8FF;
-    }
-    div.nav-active button {
-        border-bottom: 3px solid #4F8BF9 !important;
-        font-weight: bold !important;
-    }
-    </style>
-    """
-    st.markdown(button_style, unsafe_allow_html=True)
-    
-    # Add button active state markers
-    if st.session_state.selected_page == "Chat":
-        st.markdown('<div class="nav-active">', unsafe_allow_html=True)
     with col1:
-        if st.button("💬 Chat", use_container_width=True):
+        chat_btn = st.button("💭 Chat", use_container_width=True, key="chat_tab")
+        if chat_btn:
             st.session_state.selected_page = "Chat"
             st.rerun()
-    if st.session_state.selected_page == "Chat":
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-    if st.session_state.selected_page == "Tools":
-        st.markdown('<div class="nav-active">', unsafe_allow_html=True)
+    
     with col2:
-        if st.button("🔧 Tools", use_container_width=True):
+        tools_btn = st.button("🛠️ Tools", use_container_width=True, key="tools_tab")
+        if tools_btn:
             st.session_state.selected_page = "Tools"
             st.rerun()
-    if st.session_state.selected_page == "Tools":
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-    if st.session_state.selected_page == "Info":
-        st.markdown('<div class="nav-active">', unsafe_allow_html=True)
+    
     with col3:
-        if st.button("ℹ️ Info", use_container_width=True):
+        info_btn = st.button("ℹ️ Info", use_container_width=True, key="info_tab")
+        if info_btn:
             st.session_state.selected_page = "Info"
             st.rerun()
-    if st.session_state.selected_page == "Info":
-        st.markdown('</div>', unsafe_allow_html=True)
+
 
 def pageselection(): 
     """Call the appropriate page function based on selection"""
     st.session_state.dictpages[st.session_state.selected_page]()
-
-# Add a simple Hello World tool to demonstrate the tool creation functionality
-class PrintHelloWorldTool(BaseTool):
-    name = 'print_hello_world'
-    icon = '👋'
-    title = 'Print Hello World'
-    description = 'A simple function that returns the string "Hello World".'
-    
-    def _run(self, input_data):
-        """Return Hello World"""
-        return "Hello World!"
 
 
 def ensure_session_state():
@@ -1125,11 +998,8 @@ def ensure_session_state():
     if "documents" not in st.session_state:
         st.session_state.documents = st.session_state.doc_manager.list_documents()
     
-    if "database" not in st.session_state:
-        st.session_state.database = st.session_state.doc_manager.database
-    
     if "selected_page" not in st.session_state:
-        st.session_state.selected_page = "Settings"
+        st.session_state.selected_page = "Chat"
     
     if "prefix" not in st.session_state:
         st.session_state.prefix = ''
@@ -1139,6 +1009,11 @@ def ensure_session_state():
     
     if "storage" not in st.session_state:
         st.session_state.storage = CSVStorage()
+    
+    # Add flag for page reloading control
+    if "needs_rerun" not in st.session_state:
+        st.session_state.needs_rerun = False
+
 
 def main():
     """Main application entry point"""
