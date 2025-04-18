@@ -2,22 +2,38 @@ import streamlit as st
 import os
 import inspect
 import ast
-import csv
 import json
+import csv
 from datetime import datetime
 import pandas as pd
 from typing import List, Dict, Union, Callable, Any
 import importlib.util
 import sys
-from PIL import Image
 import tempfile
-import shutil
 import time
 
 # Config Constants
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
-MODELS = ['abc_model']
+MODELS = ['abc_model']  # Our custom model
 MAX_ITERATIONS = 20
+
+# Custom emoji map to ensure consistency across platforms
+EMOJI_MAP = {
+    "calculator": "🧮",
+    "chat": "💬",
+    "tools": "🔧",
+    "settings": "⚙️",
+    "info": "ℹ️",
+    "star": "⭐",
+    "trash": "🗑️",
+    "new": "➕",
+    "clear": "🔄",
+    "save": "💾",
+    "search": "🔍",
+    "warning": "⚠️",
+    "success": "✅",
+    "error": "❌"
+}
 
 # =============================================
 # STORAGE MANAGEMENT
@@ -40,13 +56,13 @@ class CSVStorage:
         if not os.path.exists(self.csv_path):
             with open(self.csv_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["session_id", "timestamp", "role", "content", "session_name", "favorite"])
+                writer.writerow(["session_id", "timestamp", "role", "content", "session_name"])
         
         # Create sessions CSV if doesn't exist
         if not os.path.exists(self.sessions_path):
             with open(self.sessions_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["session_id", "session_name", "favorite", "create_time"])
+                writer.writerow(["session_id", "session_name"])
     
     def save_chat_message(self, session_id, role, content, session_name=None):
         if session_name is None:
@@ -54,7 +70,7 @@ class CSVStorage:
             
         with open(self.csv_path, 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([session_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), role, content, session_name, False])
+            writer.writerow([session_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), role, content, session_name])
     
     def get_chat_history(self, session_id):
         if not os.path.exists(self.csv_path):
@@ -69,32 +85,15 @@ class CSVStorage:
         return messages
     
     def get_all_sessions(self):
-        if not os.path.exists(self.sessions_path):
+        if not os.path.exists(self.csv_path):
             return []
             
-        sessions = []
-        with open(self.sessions_path, 'r') as f:
+        session_ids = set()
+        with open(self.csv_path, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                sessions.append(row)
-        
-        # Sort by timestamp (newest first)
-        sessions.sort(key=lambda x: x.get("create_time", ""), reverse=True)
-        return [session["session_id"] for session in sessions]
-    
-    def get_all_sessions_data(self):
-        if not os.path.exists(self.sessions_path):
-            return []
-            
-        sessions = []
-        with open(self.sessions_path, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                sessions.append(row)
-        
-        # Sort by timestamp (newest first)
-        sessions.sort(key=lambda x: x.get("create_time", ""), reverse=True)
-        return sessions
+                session_ids.add(row["session_id"])
+        return list(session_ids)
     
     def get_all_sessions_names(self):
         if not os.path.exists(self.sessions_path):
@@ -108,120 +107,48 @@ class CSVStorage:
                     session_names[row["session_id"]] = row["session_name"]
         return session_names
     
-    def get_favorites(self):
-        if not os.path.exists(self.sessions_path):
-            return {}
-            
-        favorites = {}
-        with open(self.sessions_path, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if "session_id" in row and "favorite" in row:
-                    favorites[row["session_id"]] = row["favorite"] == "True"
-        return favorites
-    
-    def create_new_session(self, session_name=None):
-        session_id = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        if session_name is None:
-            session_name = f"Chat {session_id}"
-        
-        # Add to sessions file
-        with open(self.sessions_path, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([session_id, session_name, False, datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
-        
-        return session_id
-    
     def save_session_name(self, session_id, session_name):
         # Read existing sessions
-        sessions = []
-        with open(self.sessions_path, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row["session_id"] == session_id:
-                    row["session_name"] = session_name
-                sessions.append(row)
+        session_names = self.get_all_sessions_names()
+        session_names[session_id] = session_name
         
         # Write back all sessions
         with open(self.sessions_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["session_id", "session_name", "favorite", "create_time"])
-            for session in sessions:
-                writer.writerow([
-                    session["session_id"], 
-                    session["session_name"], 
-                    session.get("favorite", False),
-                    session.get("create_time", "")
-                ])
+            writer.writerow(["session_id", "session_name"])
+            for s_id, s_name in session_names.items():
+                writer.writerow([s_id, s_name])
     
-    def toggle_favorite(self, session_id):
-        # Read existing sessions
-        sessions = []
-        favorites = self.get_favorites()
-        is_favorite = favorites.get(session_id, False)
-        
-        with open(self.sessions_path, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row["session_id"] == session_id:
-                    row["favorite"] = str(not is_favorite)
-                sessions.append(row)
-        
-        # Write back all sessions
-        with open(self.sessions_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["session_id", "session_name", "favorite", "create_time"])
-            for session in sessions:
-                writer.writerow([
-                    session["session_id"], 
-                    session["session_name"], 
-                    session.get("favorite", False),
-                    session.get("create_time", "")
-                ])
-        
-        return not is_favorite
-    
-    def clear_chat(self, session_id):
+    def delete_session(self, session_id):
         # Read all messages
         all_messages = []
         with open(self.csv_path, 'r') as f:
             reader = csv.DictReader(f)
             all_messages = [row for row in reader if row["session_id"] != session_id]
         
-        # Write back everything except the deleted session messages
+        # Write back everything except the deleted session
         with open(self.csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["session_id", "timestamp", "role", "content", "session_name", "favorite"])
+            writer.writerow(["session_id", "timestamp", "role", "content", "session_name"])
             for msg in all_messages:
                 writer.writerow([
                     msg["session_id"], 
                     msg.get("timestamp", ""), 
                     msg["role"], 
                     msg["content"], 
-                    msg.get("session_name", ""),
-                    msg.get("favorite", False)
+                    msg.get("session_name", "")
                 ])
-    
-    def delete_session(self, session_id):
-        # Remove from chat history
-        self.clear_chat(session_id)
         
-        # Remove from sessions file
-        sessions = []
-        with open(self.sessions_path, 'r') as f:
-            reader = csv.DictReader(f)
-            sessions = [row for row in reader if row["session_id"] != session_id]
-        
-        with open(self.sessions_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["session_id", "session_name", "favorite", "create_time"])
-            for session in sessions:
-                writer.writerow([
-                    session["session_id"], 
-                    session["session_name"], 
-                    session.get("favorite", False),
-                    session.get("create_time", "")
-                ])
+        # Also remove from sessions file
+        session_names = self.get_all_sessions_names()
+        if session_id in session_names:
+            del session_names[session_id]
+            
+            with open(self.sessions_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["session_id", "session_name"])
+                for s_id, s_name in session_names.items():
+                    writer.writerow([s_id, s_name])
 
 
 class DocumentManager:
@@ -261,7 +188,7 @@ class SimpleDocument:
 class BaseTool:
     name = 'Base_tool'
     link = 'https://github.com/example/simplified-omnitool'
-    icon = '🧰'
+    icon = '🔧'
     description = 'Base tool description'
     
     def __init__(self, **kwargs):
@@ -284,7 +211,7 @@ class BaseTool:
 
 class CalculatorTool(BaseTool):
     name = 'calculator'
-    icon = '🧮'
+    icon = EMOJI_MAP["calculator"]
     title = 'Calculator'
     description = 'Perform arithmetic calculations. Input format: mathematical expression (e.g., "2 + 2", "sin(30)", "sqrt(16)")'
     
@@ -309,13 +236,13 @@ class CalculatorTool(BaseTool):
             return f"Error: {str(e)}"
 
 
-class HelloWorldTool(BaseTool):
+class PrintHelloWorldTool(BaseTool):
     name = 'print_hello_world'
-    icon = '👋'
+    icon = "💻"
     title = 'Print Hello World'
     description = 'A simple function that returns the string "Hello World".'
     
-    def _run(self, _):
+    def _run(self, input_data=None):
         return "Hello World!"
 
 
@@ -410,7 +337,6 @@ def monitor_folder(folder_path):
         
     # Make sure folder is in path
     if folder_path not in sys.path:
-        sys.modules.pop(folder_path, None)  # Remove existing module if any
         sys.path.append(folder_path)
 
     # List all .py files in the directory (excluding __init__.py)
@@ -422,11 +348,6 @@ def monitor_folder(folder_path):
     for py_file in python_files:
         file_path = os.path.join(folder_path, py_file)
         try:
-            # Clear module from cache if it exists
-            module_name = py_file.replace(".py", "")
-            if module_name in sys.modules:
-                del sys.modules[module_name]
-                
             module = import_from_file(file_path)
             if module:
                 monitored_modules.append(module)
@@ -459,7 +380,7 @@ class ToolManager:
     def make_tools_list(self):
         """Build the list of available tools"""
         # Built-in tools
-        base_tools = [CalculatorTool(), HelloWorldTool()]
+        base_tools = [CalculatorTool()]
         
         # Create tools directory if it doesn't exist
         tools_dir = os.path.join(BASE_DIR, "tools")
@@ -494,7 +415,7 @@ class ToolManager:
                             {
                                 "name": name,
                                 "description": func.__doc__,
-                                "icon": "🔧",
+                                "icon": "🛠️",
                                 "title": name.replace("_", " ").title(),
                                 "_run": lambda self, input_data, fn=func: str(fn(input_data))
                             }
@@ -504,12 +425,6 @@ class ToolManager:
                 print(f"Error processing module: {e}")
                 
         return base_tools
-        
-    def reload_tools(self):
-        """Reload all tools"""
-        self.structured_tools = self.make_tools_list()
-        self.tools_description = self.make_tools_description()
-        return self.structured_tools
 
 
 # =============================================
@@ -608,233 +523,161 @@ Chat History:
         return prompt
     
     def _call_abc_model(self, prompt):
-        """Call our custom model"""
+        """Call our custom model - implementation would be provided separately"""
         # This is where you'd call your abc_response function
-        return abc_response(prompt)
+        # For now, we'll return a placeholder
+        return "This would be a response from the abc_response(prompt) function. In a real implementation, you would call your model here."
 
 
 # =============================================
 # UI COMPONENTS
 # =============================================
 
-def replace_emojis_with_text(text, emoji_dict=None):
-    """Replace emojis with text equivalents for Linux compatibility"""
-    if emoji_dict is None:
-        emoji_dict = {
-            '🧮': '[CALC]',
-            '👋': '[HELLO]',
-            '🔧': '[TOOL]',
-            '📊': '[CHART]',
-            '📝': '[NOTE]',
-            '💻': '[CODE]',
-            '🔍': '[SEARCH]',
-            '🔄': '[REFRESH]',
-            '❌': '[DELETE]',
-            '⭐': '[STAR]',
-            '🧰': '[TOOLBOX]',
-            '❓': '[HELP]',
-            '📁': '[FILE]',
-        }
-    
-    for emoji, replacement in emoji_dict.items():
-        text = text.replace(emoji, replacement)
-    
-    return text
-
-
-def get_platform_compatible_icon(icon):
-    """Get a platform-compatible icon (text or emoji)"""
-    # Check if we're on Linux
-    is_linux = sys.platform.startswith('linux')
-    
-    # If on Linux, replace emojis with FontAwesome or text equivalents
-    if is_linux:
-        emoji_to_fa = {
-            '🧮': 'calculator',
-            '👋': 'hand-wave',
-            '🔧': 'wrench',
-            '📊': 'chart-bar',
-            '📝': 'pen',
-            '💻': 'laptop-code',
-            '🔍': 'search',
-            '🔄': 'sync',
-            '❌': 'times',
-            '⭐': 'star',
-            '🧰': 'toolbox',
-            '❓': 'question',
-            '📁': 'folder',
-        }
-        
-        return emoji_to_fa.get(icon, 'tools')
-    
-    return icon
-
-
 def sidebar():
     with st.sidebar:
-        st.write("## OmniTool")
-        st.markdown("---")  # Separator
-        
-        st.write("### Chat Actions")
-        
+        # Quick actions section
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("New Chat", use_container_width=True, type="primary"):
-                # Create a new session
-                new_session_id = st.session_state.storage.create_new_session("New Chat")
-                st.session_state.session_id = new_session_id
+            if st.button(f"{EMOJI_MAP['new']} Start new chat", use_container_width=True):
+                st.session_state.session_id = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 st.session_state.memory.clear()
+                st.session_state.selected_page = 'Chat'
+                # Set default name
+                st.session_state.storage.save_session_name(
+                    st.session_state.session_id, 
+                    "Initial Basic Greeting"
+                )
                 st.rerun()
         
         with col2:
-            if st.button("Clear Chat", use_container_width=True):
+            if st.button(f"{EMOJI_MAP['clear']} Clear current chat", use_container_width=True):
                 if "session_id" in st.session_state:
-                    st.session_state.storage.clear_chat(st.session_state.session_id)
                     st.session_state.memory.clear()
+                    st.session_state.storage.delete_session(st.session_state.session_id)
                     st.rerun()
-                    
-        st.markdown("---")
         
-        st.write("### Saved Chats")
-        st.write("Previous chats will be automatically deleted after one week")
+        st.markdown("### Saved Chats")
         
-        # Get sessions data
-        sessions = st.session_state.storage.get_all_sessions_data()
-        favorites = st.session_state.storage.get_favorites()
+        # Show the pinned chats first
+        st.markdown("#### Previous Chats")
+        st.markdown("*Deleted after one week*")
         
-        # Display favorites first
-        if any(favorites.values()):
-            st.write("#### Favorites")
-            for session in sessions:
-                session_id = session["session_id"]
-                if favorites.get(session_id, False):
-                    session_name = session["session_name"]
-                    
-                    col1, col2, col3 = st.columns([6, 1, 1])
-                    with col1:
-                        if st.button(f"⭐ {session_name}", key=f"fav_session_{session_id}", use_container_width=True):
-                            st.session_state.session_id = session_id
-                            st.session_state.memory.clear()  # Clear memory to reload from storage
-                            st.rerun()
-                    
-                    with col2:
-                        if st.button("⭐", key=f"unfav_{session_id}", help="Remove from favorites"):
-                            st.session_state.storage.toggle_favorite(session_id)
-                            st.rerun()
-                    
-                    with col3:
-                        if st.button("🗑️", key=f"del_fav_{session_id}", help="Delete chat"):
-                            st.session_state.storage.delete_session(session_id)
-                            # If current session was deleted, create a new one
-                            if st.session_state.session_id == session_id:
-                                new_session_id = st.session_state.storage.create_new_session("New Chat")
-                                st.session_state.session_id = new_session_id
-                                st.session_state.memory.clear()
-                            st.rerun()
+        session_id_list = st.session_state.storage.get_all_sessions()
+        st.session_state.session_name = st.session_state.storage.get_all_sessions_names()
         
-        # Display regular sessions
-        st.write("#### Recent Chats")
-        for session in sessions:
-            session_id = session["session_id"]
-            if not favorites.get(session_id, False):
-                session_name = session["session_name"]
+        # Add star for favorite sessions
+        for session_id in reversed(session_id_list):
+            session_name = st.session_state.session_name.get(session_id, session_id)
+            
+            # Create a container for each session with hover effect
+            session_container = st.container()
+            with session_container:
+                col1, col2, col3 = st.columns([1, 5, 1])
                 
-                col1, col2, col3 = st.columns([6, 1, 1])
+                # Star icon for favorites
                 with col1:
-                    if st.button(f"{session_name}", key=f"session_{session_id}", use_container_width=True):
-                        st.session_state.session_id = session_id
-                        st.session_state.memory.clear()  # Clear memory to reload from storage
+                    star_key = f"star_{session_id}"
+                    if star_key not in st.session_state:
+                        st.session_state[star_key] = False
+                    
+                    if st.button(
+                        EMOJI_MAP["star"], 
+                        key=star_key,
+                        help="Mark as favorite"
+                    ):
+                        st.session_state[star_key] = not st.session_state[star_key]
                         st.rerun()
                 
+                # Session name/button
                 with col2:
-                    if st.button("☆", key=f"fav_{session_id}", help="Add to favorites"):
-                        st.session_state.storage.toggle_favorite(session_id)
+                    if st.button(session_name, key=f"session_{session_id}", use_container_width=True):
+                        st.session_state.session_id = session_id
+                        st.session_state.memory.clear()
+                        # Load chat history into memory
+                        messages = st.session_state.storage.get_chat_history(session_id)
+                        for msg in messages:
+                            if msg["role"] == "user":
+                                st.session_state.memory.add_user_message(msg["content"])
+                            else:
+                                st.session_state.memory.add_ai_message(msg["content"])
+                        st.session_state.selected_page = 'Chat'
                         st.rerun()
                 
+                # Delete button
                 with col3:
-                    if st.button("🗑️", key=f"del_{session_id}", help="Delete chat"):
+                    if st.button(
+                        EMOJI_MAP["trash"], 
+                        key=f"delete_{session_id}",
+                        help="Delete this chat"
+                    ):
                         st.session_state.storage.delete_session(session_id)
-                        # If current session was deleted, create a new one
-                        if st.session_state.session_id == session_id:
-                            new_session_id = st.session_state.storage.create_new_session("New Chat")
-                            st.session_state.session_id = new_session_id
-                            st.session_state.memory.clear()
                         st.rerun()
+            
+            # Rename input field - only show when clicked
+            if f"rename_active_{session_id}" not in st.session_state:
+                st.session_state[f"rename_active_{session_id}"] = False
+                
+            if st.session_state.get(f"rename_active_{session_id}", False):
+                with session_container:
+                    rename_col1, rename_col2 = st.columns([6, 1])
+                    with rename_col1:
+                        st.text_input(
+                            "New name", 
+                            key=f"new_name_{session_id}",
+                            value=session_name,
+                            label_visibility="collapsed"
+                        )
+                    with rename_col2:
+                        if st.button("Save", key=f"save_rename_{session_id}"):
+                            if st.session_state[f"new_name_{session_id}"]:
+                                st.session_state.storage.save_session_name(
+                                    session_id, 
+                                    st.session_state[f"new_name_{session_id}"]
+                                )
+                            st.session_state[f"rename_active_{session_id}"] = False
+                            st.rerun()
+            else:
+                # Show "Rename" option on right-click or long press (simulated with double click)
+                if session_container.button(
+                    "Rename", 
+                    key=f"rename_btn_{session_id}",
+                    help="Rename this chat"
+                ):
+                    st.session_state[f"rename_active_{session_id}"] = True
+                    st.rerun()
 
 
-def rename_session_callback(new_name):
-    if new_name:
-        st.session_state.storage.save_session_name(st.session_state.session_id, new_name)
-        st.success(f"Chat renamed to {new_name}")
-        time.sleep(0.5)
-        st.rerun()
+def change_session_name(session_id):
+    new_name_key = f'new_name_{session_id}'
+    if new_name_key in st.session_state and st.session_state[new_name_key]:
+        st.session_state.storage.save_session_name(session_id, st.session_state[new_name_key])
 
 
 def chat_page():
-    # Check if we have a session
-    if "session_id" not in st.session_state:
-        new_session_id = st.session_state.storage.create_new_session("New Chat")
-        st.session_state.session_id = new_session_id
-    
-    # Get session name
-    session_names = st.session_state.storage.get_all_sessions_names()
-    current_session_name = session_names.get(st.session_state.session_id, "Chat")
-    
-    # Header with rename option
-    col1, col2 = st.columns([6, 1])
-    with col1:
-        st.markdown(f"## {current_session_name}")
-    
-    with col2:
-        if st.button("Rename", type="secondary", use_container_width=True):
-            st.session_state.renaming_session = True
-    
-    if st.session_state.get("renaming_session", False):
-        new_name = st.text_input("New name", value=current_session_name)
-        col1, col2 = st.columns([6, 1])
-        with col1:
-            if st.button("Save", type="primary", use_container_width=True):
-                rename_session_callback(new_name)
-                st.session_state.renaming_session = False
-        with col2:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state.renaming_session = False
-    
     # Show selected tools
-    selected_tools = [tool.name for tool in st.session_state.tools]
-    if selected_tools:
-        st.info(f"Selected tools: {', '.join(selected_tools)}")
+    tools_str = ', '.join(st.session_state.selected_tools)
+    st.info(f'Selected tools: {tools_str}')
     
     # Initialize agent if needed
-    if "agent_instance" not in st.session_state:
+    if "agent_instance" not in st.session_state or st.session_state.agent_needs_update:
         st.session_state.agent_instance = SimpleAgent(
             st.session_state.model,
             st.session_state.tools,
             st.session_state.memory
         )
+        st.session_state.agent_needs_update = False
     
-    # Load chat history
-    messages = st.session_state.storage.get_chat_history(st.session_state.session_id)
-    
-    # Initialize memory from storage if needed
-    if not st.session_state.memory.chat_memory:
-        for msg in messages:
-            if msg["role"] == "user":
-                st.session_state.memory.add_user_message(msg["content"])
-            else:
-                st.session_state.memory.add_ai_message(msg["content"])
+    # Get chat history
+    st.session_state.messages = st.session_state.storage.get_chat_history(st.session_state.session_id)
     
     # Display messages
-    for msg in messages:
-        if msg["role"] == "user":
-            st.chat_message("user").write(msg["content"])
-        else:
-            st.chat_message("assistant").write(msg["content"])
+    for msg in st.session_state.messages:
+        st.chat_message(msg["role"]).write(msg["content"])
     
     # Input
     if prompt := st.chat_input("Type your message here..."):
         # Search documents if database exists
-        if "database" in st.session_state and st.session_state.database:
+        if hasattr(st.session_state, "database") and st.session_state.database:
             # Do a similarity search in the loaded documents with the user's input
             similar_docs = st.session_state.database.similarity_search(prompt)
             # Insert the content of the most similar document into the prompt
@@ -854,6 +697,7 @@ def chat_page():
         # Get response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
+                # This is where your custom LLM function would be called
                 response = st.session_state.agent_instance.run(prompt)
             st.write(response)
         
@@ -861,131 +705,273 @@ def chat_page():
         st.session_state.memory.add_ai_message(response)
         
         # Save to storage
-        session_name = st.session_state.storage.get_all_sessions_names().get(st.session_state.session_id, st.session_state.session_id)
+        session_name = st.session_state.session_name.get(st.session_state.session_id, st.session_state.session_id)
         st.session_state.storage.save_chat_message(st.session_state.session_id, "user", original_prompt, session_name)
         st.session_state.storage.save_chat_message(st.session_state.session_id, "assistant", response, session_name)
+        st.session_state.storage.save_session_name(st.session_state.session_id, session_name)
 
 
 def tools_page():
-    st.markdown("## Tools")
-    
     # Tool selection
     st.session_state.selected_tools = []
     
-    # Search bar
-    search_term = st.text_input("🔍 Search tools", placeholder="Search tools by name or description")
+    # Tool search with icon
+    search_col1, search_col2 = st.columns([1, 6])
+    with search_col1:
+        st.markdown(f"### {EMOJI_MAP['search']}")
+    with search_col2:
+        tool_search = st.text_input('Search', placeholder='Search tools by name or description', 
+                                  key='tool_search', label_visibility="collapsed")
     
     # Filter tools based on search
-    if search_term:
+    if tool_search:
         st.session_state.tool_filtered = [tool for tool in st.session_state.tool_manager.get_tool_names() 
-                                        if search_term.lower() in tool.lower() or 
-                                          search_term.lower() in st.session_state.tool_manager.tools_description[tool].lower()]
+                                        if tool_search.lower() in tool.lower() or 
+                                          tool_search.lower() in st.session_state.tool_manager.tools_description[tool].lower()]
     else:
         st.session_state.tool_filtered = st.session_state.tool_manager.get_tool_names()
     
-    # Display tools as cards in a grid layout with consistent sizing
-    st.markdown("### Available Tools")
+    # Display tools as cards with consistent styling
+    st.markdown("""
+    <style>
+    .tool-card {
+        background-color: #f9f9f9;
+        border-radius: 5px;
+        padding: 15px;
+        margin-bottom: 15px;
+        border: 1px solid #e0e0e0;
+        height: 200px;
+        overflow: hidden;
+        position: relative;
+        transition: all 0.3s ease;
+    }
+    .tool-card:hover {
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        transform: translateY(-2px);
+    }
+    .tool-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+    .tool-title {
+        font-size: 18px;
+        font-weight: bold;
+        margin: 0;
+    }
+    .tool-description {
+        font-size: 14px;
+        color: #555;
+        margin-bottom: 10px;
+        flex: 1;
+        overflow: hidden;
+    }
+    .tool-checkbox {
+        margin-top: 10px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
-    # Create columns for tools grid
-    tool_count = len(st.session_state.tool_filtered)
-    if tool_count > 0:
-        cols = st.columns(min(3, tool_count))
+    # Create a grid layout for tools
+    cols = st.columns(3)
+    
+    for i, tool_name in enumerate(st.session_state.tool_filtered):
+        tool = st.session_state.tool_manager.get_selected_tools([tool_name])[0]
+        col = cols[i % 3]
         
-        for i, tool_name in enumerate(st.session_state.tool_filtered):
-            tool = st.session_state.tool_manager.get_selected_tools([tool_name])[0]
-            col_idx = i % len(cols)
-            
-            with cols[col_idx]:
-                with st.container(border=True, height=180):  # Fixed height for consistent card sizing
-                    is_selected = st.checkbox(
-                        f"{get_platform_compatible_icon(tool.icon)} {tool.title}", 
-                        value=tool_name in st.session_state.clicked_cards,
-                        key=f"tool_{tool_name}"
-                    )
-                    
-                    # Description with limited height
-                    st.markdown(f"<div style='height: 100px; overflow-y: auto;'><small>{tool.description}</small></div>", unsafe_allow_html=True)
-                    
-                    if is_selected:
-                        st.session_state.clicked_cards[tool_name] = True
-                        st.session_state.selected_tools.append(tool_name)
-                    else:
-                        st.session_state.clicked_cards[tool_name] = False
-    else:
-        st.info("No tools found matching your search criteria.")
+        with col:
+            # Create a custom styled card
+            card = st.container()
+            with card:
+                # Use a custom HTML/CSS card for consistent styling
+                card_html = f"""
+                <div class="tool-card">
+                    <div class="tool-header">
+                        <h3 class="tool-title">{tool.icon} {tool.title}</h3>
+                    </div>
+                    <div class="tool-description">
+                        {tool.description}
+                    </div>
+                </div>
+                """
+                st.markdown(card_html, unsafe_allow_html=True)
+                
+                # Add the checkbox below the card for selection
+                is_selected = st.checkbox(
+                    "Select", 
+                    value=tool_name in st.session_state.clicked_cards,
+                    key=f"tool_{tool_name}"
+                )
+                
+                if is_selected:
+                    st.session_state.clicked_cards[tool_name] = True
+                    st.session_state.selected_tools.append(tool_name)
+                else:
+                    st.session_state.clicked_cards[tool_name] = False
+                
+                # Call the tool's UI method if it exists
+                if hasattr(tool, '_ui') and callable(tool._ui):
+                    tool._ui()
     
     # Update the tools in session state
     st.session_state.tools = st.session_state.tool_manager.get_selected_tools(st.session_state.selected_tools)
+    st.session_state.agent_needs_update = True
     
-    # Add new tool section
+    # Create new tool section
     st.markdown("---")
-    st.markdown("## Create New Tool")
     
-    new_tool_name = st.text_input("Tool filename (without .py extension)")
+    # Use columns for better layout
+    tool_col1, tool_col2 = st.columns([1, 3])
     
-    new_tool_function = st.text_area(
-        "Tool code", 
-        height=250,
-        placeholder="""def my_tool(input_data):
+    with tool_col1:
+        st.subheader("Create New Tool")
+    
+    with tool_col2:
+        new_tool_btn = st.button("+ Create Tool", key="create_tool_btn")
+    
+    if "show_tool_creator" not in st.session_state:
+        st.session_state.show_tool_creator = False
+        
+    if new_tool_btn:
+        st.session_state.show_tool_creator = True
+    
+    if st.session_state.show_tool_creator:
+        # Tool creation form with improved styling
+        with st.container(border=True):
+            st.subheader("Create New Tool")
+            
+            new_tool_name = st.text_input("Tool file name", key="new_tool_name")
+            
+            # Code editor with syntax highlighting
+            new_tool_function = st.text_area(
+                "Tool code", 
+                height=300,
+                key="new_tool_code",
+                placeholder="""def my_tool(input_data):
     \"\"\"Description of what this tool does and how to use it\"\"\"
     # Tool implementation here
     return f"Result: {input_data}"
 """
+            )
+            
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                submit_btn = st.button("Create", use_container_width=True)
+            with col2:
+                cancel_btn = st.button("Cancel", use_container_width=True)
+            
+            if cancel_btn:
+                st.session_state.show_tool_creator = False
+                st.rerun()
+                
+            if submit_btn:
+                if new_tool_name and new_tool_function:
+                    # Show spinner while processing
+                    with st.spinner("Creating tool..."):
+                        # Validate function
+                        runs, has_doc, func_name = evaluate_function_string(new_tool_function)
+                        
+                        if runs is True and has_doc is True:
+                            # Create the tools directory if it doesn't exist
+                            tools_dir = os.path.join(BASE_DIR, "tools", "custom_tools")
+                            os.makedirs(tools_dir, exist_ok=True)
+                            
+                            # Save the tool
+                            tool_path = os.path.join(tools_dir, f"{new_tool_name}.py")
+                            with open(tool_path, "w") as f:
+                                f.write(new_tool_function)
+                            
+                            # Reinitialize tool manager without requiring full page refresh
+                            st.session_state.tool_manager = ToolManager()
+                            st.session_state.tool_list = st.session_state.tool_manager.structured_tools
+                            
+                            # Success message
+                            st.success(f"Tool '{new_tool_name}' created successfully!")
+                            
+                            # Hide the tool creator form
+                            st.session_state.show_tool_creator = False
+                            
+                            # Force the UI to update with the new tool
+                            time.sleep(0.5)  # Small delay to ensure file is processed
+                            st.rerun()
+                        else:
+                            if not runs is True:
+                                st.error(f"Error in function: {runs}")
+                            if not has_doc is True:
+                                st.error("Function must have a docstring.")
+                else:
+                    st.error("Please provide both a name and function code for the tool.")
+
+
+def settings_page():
+    st.markdown("### ⚙️ Settings")
+    st.markdown("---")
+    
+    # Model selection
+    st.session_state.model = st.selectbox(
+        "Select a model", 
+        options=MODELS,
+        index=MODELS.index(st.session_state.model)
     )
     
-    col1, col2 = st.columns([1, 5])
+    # Prompt prefix and suffix
+    col1, col2 = st.columns(2)
     with col1:
-        create_tool = st.button("Create Tool", type="primary", use_container_width=True)
+        st.session_state.prefix = st.text_area(
+            'Prefix',
+            value=st.session_state.prefix,
+            placeholder='Text to add before user input',
+            height=150
+        )
     
-    if create_tool:
-        if new_tool_name and new_tool_function:
-            # Validate function
-            runs, has_doc, func_name = evaluate_function_string(new_tool_function)
+    with col2:
+        st.session_state.suffix = st.text_area(
+            'Suffix',
+            value=st.session_state.suffix,
+            placeholder='Text to add after user input',
+            height=150
+        )
+    
+    # Document management
+    with st.expander("Document Management", expanded=False):
+        uploaded_files = st.file_uploader(
+            "Upload Documents", 
+            type=['txt', 'pdf'], 
+            accept_multiple_files=True
+        )
+        
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                if uploaded_file.type == 'text/plain':
+                    # Read text file
+                    content = uploaded_file.getvalue().decode('utf-8')
+                    st.session_state.doc_manager.add_document(uploaded_file.name, content)
+                
+                elif uploaded_file.type == 'application/pdf':
+                    # For PDFs, we'd use a PDF library in a real app
+                    # Here we'll just store the name for demo purposes
+                    st.session_state.doc_manager.add_document(
+                        uploaded_file.name, 
+                        f"[PDF Content from {uploaded_file.name}]"
+                    )
             
-            if runs is True and has_doc is True:
-                # Create the tools directory if it doesn't exist
-                tools_dir = os.path.join(BASE_DIR, "tools", "custom_tools")
-                os.makedirs(tools_dir, exist_ok=True)
-                
-                # Save the tool
-                tool_path = os.path.join(tools_dir, f"{new_tool_name}.py")
-                with open(tool_path, "w") as f:
-                    f.write(new_tool_function)
-                
-                # Force clean tool cache for reload
-                import importlib
-                if new_tool_name in sys.modules:
-                    del sys.modules[new_tool_name]
-                
-                # Reload tool manager
-                st.session_state.tool_manager.reload_tools()
-                st.session_state.tool_list = st.session_state.tool_manager.structured_tools
-                
-                st.success(f"Tool '{new_tool_name}' created successfully!")
-                time.sleep(0.5)  # Brief pause for feedback
-                st.rerun()
-            else:
-                if not runs is True:
-                    st.error(f"Error in function: {runs}")
-                if not has_doc is True:
-                    st.error("Function must have a docstring.")
+            st.success("Documents loaded successfully.")
+        
+        if st.button("Clear Documents"):
+            for doc_name in st.session_state.doc_manager.list_documents():
+                st.session_state.doc_manager.remove_document(doc_name)
+            st.success("All documents removed.")
+        
+        st.write("Loaded documents:")
+        if st.session_state.doc_manager.list_documents():
+            for doc in st.session_state.doc_manager.list_documents():
+                st.write(f"- {doc}")
         else:
-            st.error("Please provide both a name and function code for the tool.")
-    
-    # Display information about created tools
-    custom_tools_dir = os.path.join(BASE_DIR, "tools", "custom_tools")
-    if os.path.exists(custom_tools_dir):
-        custom_tools = [f for f in os.listdir(custom_tools_dir) if f.endswith('.py')]
-        if custom_tools:
-            st.markdown("### Custom Tools")
-            for tool_file in custom_tools:
-                st.markdown(f"- **{tool_file}**")
+            st.write("No documents loaded.")
 
 
 def info_page():
-    st.markdown("## About OmniTool")
-    st.markdown("---")
-    
     st.markdown("""
     # Simplified OmniTool
     
@@ -994,18 +980,17 @@ def info_page():
     
     ## Features
     
-    - Custom language model integration with `abc_response(prompt)`
+    - Custom language model integration via `abc_response` function
     - Tool selection and management
-    - Session history management with favorites and organization
-    - Document reference integration
+    - Session history management with CSV storage
     - Custom tool creation
     
     ## Usage Guidelines
     
     ### Select tools in the tools page:
     
-    - Search for tools by name and description
-    - Select tools you want to use
+    - Search tools by name and description
+    - Select tools you want to use in your chat
     - Create custom tools directly from the interface
     
     ### Chat with the AI in the chat page:
@@ -1018,84 +1003,32 @@ def info_page():
     
     You can create custom tools by:
     
-    1. Going to the Tools page
-    2. Entering a name for your tool file
-    3. Writing a Python function with a proper docstring
+    1. Clicking the "+ Create Tool" button in the Tools page
+    2. Writing a Python function with a proper docstring
     
     Example:
     ```python
     def weather_lookup(location):
-        """Look up the weather for a specific location"""
+        \"\"\"Look up the weather for a specific location\"\"\"
         # Implementation would go here
         return f"The weather in {location} is sunny."
     ```
+    
+    ## About the LLM Integration
+    
+    This application uses a custom language model via the `abc_response(prompt)` function.
+    The actual implementation of this function needs to be provided separately.
     """)
-
-
-# =============================================
-# MAIN APPLICATION SETUP
-# =============================================
-
-def setup_navigation():
-    """Set up the navigation menu"""
-    st.markdown(
-        """
-        <style>
-        .stButton button {
-            width: 100%;
-            border-radius: 5px;
-            height: 3em;
-            font-weight: bold;
-        }
-        .stTextInput > div > div > input {
-            border-radius: 5px;
-        }
-        </style>
-        """, 
-        unsafe_allow_html=True
-    )
-    
-    # Define the tabs
-    tab1, tab2, tab3 = st.tabs(["💬 Chat", "🔧 Tools", "ℹ️ Info"])
-    
-    with tab1:
-        if st.session_state.selected_page == "Chat":
-            chat_page()
-    
-    with tab2:
-        if st.session_state.selected_page == "Tools":
-            tools_page()
-    
-    with tab3:
-        if st.session_state.selected_page == "Info":
-            info_page()
-    
-    # Set the active tab based on selected page
-    active_tab = 0
-    if st.session_state.selected_page == "Tools":
-        active_tab = 1
-    elif st.session_state.selected_page == "Info":
-        active_tab = 2
-    
-    # Use JavaScript to select the active tab
-    st.markdown(
-        f"""
-        <script>
-            var tabs = window.parent.document.querySelectorAll('.stTabs button[role="tab"]');
-            tabs[{active_tab}].click();
-        </script>
-        """,
-        unsafe_allow_html=True
-    )
 
 
 def ensure_session_state():
     """Initialize session state variables"""
     if "session_id" not in st.session_state:
-        # Create an initial session
-        storage = CSVStorage()
-        new_session_id = storage.create_new_session("New Chat")
-        st.session_state.session_id = new_session_id
+        session_id = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        st.session_state.session_id = session_id
+        # Set default name for new session
+        if "storage" in st.session_state:
+            st.session_state.storage.save_session_name(session_id, "Initial Basic Greeting")
     
     if "model" not in st.session_state:
         st.session_state.model = "abc_model"
@@ -1140,33 +1073,277 @@ def ensure_session_state():
     if "storage" not in st.session_state:
         st.session_state.storage = CSVStorage()
     
-    if "renaming_session" not in st.session_state:
-        st.session_state.renaming_session = False
+    if "agent_needs_update" not in st.session_state:
+        st.session_state.agent_needs_update = True
 
+
+class SimpleAgent:
+    def __init__(self, model, tools, memory):
+        self.model = model
+        self.tools = tools
+        self.memory = memory
+        self.max_iterations = MAX_ITERATIONS
+    
+    def run(self, input_text, callbacks=None):
+        """Process the input and return a response"""
+        # First, check if we should use a tool
+        tool_result = None
+        
+        # Build full prompt with memory
+        full_prompt = self._build_prompt(input_text)
+        
+        # Send to LLM using the custom abc_response function
+        # Note: The actual implementation of abc_response should be provided
+        response = self._call_abc_model(full_prompt)
+        
+        # Tool processing logic
+        if any(f"I'll use the {tool.name} tool" in response for tool in self.tools):
+            # Extract tool name and input
+            for tool in self.tools:
+                if f"I'll use the {tool.name} tool" in response:
+                    # Simple way to extract tool input - could be more sophisticated
+                    tool_input_marker = f"I'll use the {tool.name} tool with input:"
+                    if tool_input_marker in response:
+                        parts = response.split(tool_input_marker)
+                        if len(parts) > 1:
+                            tool_input = parts[1].strip()
+                            tool_result = tool.run(tool_input)
+                            
+                            # Build a new prompt with the tool result
+                            full_prompt = self._build_prompt(
+                                input_text, 
+                                f"I used the {tool.name} tool with input: {tool_input}\nResult: {tool_result}"
+                            )
+                            
+                            # Get final response
+                            response = self._call_abc_model(full_prompt)
+        
+        return response
+    
+    def _build_prompt(self, input_text, tool_info=None):
+        """Build a full prompt including memory, tools info, and input"""
+        # Format chat history
+        history = ""
+        for msg in self.memory.chat_memory:
+            history += f"{msg['role'].title()}: {msg['content']}\n\n"
+        
+        # Format tools info
+        tools_info = "You have access to the following tools:\n"
+        for tool in self.tools:
+            tools_info += f"- {tool.name}: {tool.description}\n"
+        
+        # Add guidance on tool usage
+        tools_info += "\nWhen you need to use a tool, write: 'I'll use the [tool_name] tool with input: [tool_input]'"
+        
+        # Build the full prompt
+        prompt = f"""
+You are an AI assistant having a conversation with a human.
+
+{tools_info}
+
+Chat History:
+{history}
+
+"""
+        
+        # Add tool info if provided
+        if tool_info:
+            prompt += f"Tool usage information:\n{tool_info}\n\n"
+        
+        # Add the user's input
+        prompt += f"User: {input_text}\nAssistant:"
+        
+        return prompt
+    
+    def _call_abc_model(self, prompt):
+        """Call the custom abc_response function"""
+        # This is where the abc_response function would be called
+        # For testing purposes, we'll just return a placeholder response
+        # In production, replace this with: return abc_response(prompt)
+        
+        # For demonstration, return a message that shows we'd call abc_response
+        return f"This would be a response from calling abc_response() with the prompt. In production, replace this line with: return abc_response(prompt)"
+    - Create custom tools directly from the interface
+    
+    ### Chat with the AI in the chat page:
+    
+    - Start a new session or continue an existing one
+    - The AI can use tools when needed
+    - View chat history and manage sessions
+    
+    ## Getting Started
+    
+    1. Navigate to the Settings page to configure the model
+    2. Visit the Tools page to select which tools you want to enable
+    3. Go to the Chat page to start interacting with the AI
+    
+    ## Creating Custom Tools
+    
+    You can create custom tools by:
+    
+    1. Using the "Create New Tool" section in the Tools page
+    2. Writing a Python function with a proper docstring
+    
+    Example:
+    ```python
+    def weather_lookup(location):
+        """Look up the weather for a specific location"""
+        # Implementation would go here
+        return f"The weather in {location} is sunny."
+    ```
+    """)
+
+# =============================================
+# MAIN APPLICATION SETUP
+# =============================================
+
+def option_menu_cb():
+    """Callback for menu selection"""
+    st.session_state.selected_page = st.session_state.menu_opt
+
+def menusetup():
+    """Set up the navigation menu"""
+    list_menu = ["Chat", "Tools", "Info"]  # Removed Settings page
+    list_pages = [chat_page, tools_page, info_page]  # Removed settings_page
+    st.session_state.dictpages = dict(zip(list_menu, list_pages))
+    
+    # Create a simple tab-based navigation
+    col1, col2, col3 = st.columns(3)
+    
+    btn_style = """
+    <style>
+    div.stButton > button {
+        background-color: transparent;
+        color: #4F8BF9;
+        border: none;
+        border-radius: 0;
+        font-weight: normal;
+        width: 100%;
+        height: 50px;
+    }
+    div.stButton > button:hover {
+        background-color: rgba(79, 139, 249, 0.1);
+        color: #4F8BF9;
+    }
+    div.stButton > button:focus {
+        background-color: rgba(79, 139, 249, 0.2);
+        color: #4F8BF9;
+        box-shadow: none;
+    }
+    </style>
+    """
+    st.markdown(btn_style, unsafe_allow_html=True)
+    
+    # Highlight active tab
+    active_style = """
+    <style>
+    div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-child({}) div.stButton > button {{
+        border-bottom: 2px solid #4F8BF9;
+        font-weight: bold;
+        background-color: rgba(79, 139, 249, 0.1);
+    }}
+    </style>
+    """
+    
+    active_index = list_menu.index(st.session_state.selected_page) + 1
+    st.markdown(active_style.format(active_index), unsafe_allow_html=True)
+    
+    # Render the buttons
+    with col1:
+        if st.button(f"{EMOJI_MAP['chat']} Chat", use_container_width=True, key='btn_chat'):
+            st.session_state.selected_page = "Chat"
+            st.rerun()
+    
+    with col2:
+        if st.button(f"{EMOJI_MAP['tools']} Tools", use_container_width=True, key='btn_tools'):
+            st.session_state.selected_page = "Tools"
+            st.rerun()
+    
+    with col3:
+        if st.button(f"{EMOJI_MAP['info']} Info", use_container_width=True, key='btn_info'):
+            st.session_state.selected_page = "Info"
+            st.rerun()
+
+def pageselection(): 
+    """Call the appropriate page function based on selection"""
+    st.session_state.dictpages[st.session_state.selected_page]()
+
+def ensure_session_state():
+    """Initialize session state variables"""
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    
+    if "model" not in st.session_state:
+        st.session_state.model = "abc_model"
+    
+    if "tool_manager" not in st.session_state:
+        st.session_state.tool_manager = ToolManager()
+        st.session_state.tool_list = st.session_state.tool_manager.structured_tools
+    
+    if "initial_tools" not in st.session_state:
+        st.session_state.initial_tools = ['calculator']
+    
+    if "selected_tools" not in st.session_state:
+        st.session_state.selected_tools = st.session_state.initial_tools
+    
+    if "tools" not in st.session_state:
+        st.session_state.tools = st.session_state.tool_manager.get_selected_tools(st.session_state.initial_tools)
+    
+    if "clicked_cards" not in st.session_state:
+        st.session_state.clicked_cards = {tool_name: True for tool_name in st.session_state.initial_tools}
+    
+    if "memory" not in st.session_state:
+        st.session_state.memory = AgentMemory()
+    
+    if "doc_manager" not in st.session_state:
+        st.session_state.doc_manager = DocumentManager()
+    
+    if "documents" not in st.session_state:
+        st.session_state.documents = st.session_state.doc_manager.list_documents()
+    
+    if "database" not in st.session_state:
+        st.session_state.database = st.session_state.doc_manager.database
+    
+    if "selected_page" not in st.session_state:
+        st.session_state.selected_page = "Settings"
+    
+    if "prefix" not in st.session_state:
+        st.session_state.prefix = ''
+    
+    if "suffix" not in st.session_state:
+        st.session_state.suffix = ''
+    
+    if "storage" not in st.session_state:
+        st.session_state.storage = CSVStorage()
 
 def main():
     """Main application entry point"""
     # Set page config
+    im = Image.open("appicon.ico") if os.path.exists("appicon.ico") else None
+    
     st.set_page_config(
-        page_title="OmniTool",
-        page_icon="🧰",
+        page_title="Simplified OmniTool",
+        page_icon=im,
         initial_sidebar_state="expanded",
-        layout="wide",
         menu_items={
+            'Get Help': 'https://github.com/example/simplified-omnitool',
+            'Report a bug': "https://github.com/example/simplified-omnitool",
             'About': "Simplified version of OmniTool for custom LLM integration"
         }
     )
     
-    # Make sure directories exist
-    os.makedirs(os.path.join(BASE_DIR, "tools", "custom_tools"), exist_ok=True)
-    
     # Initialize session state
     ensure_session_state()
     
+    # Create tools directory if it doesn't exist
+    tools_dir = os.path.join(BASE_DIR, "tools", "custom_tools")
+    os.makedirs(tools_dir, exist_ok=True)
+    
     # Set up UI
+    st.title("Simplified OmniTool")
+    menusetup()
     sidebar()
-    setup_navigation()
-
+    pageselection()
 
 if __name__ == "__main__":
     main()
